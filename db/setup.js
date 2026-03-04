@@ -44,9 +44,14 @@ async function setup() {
         image_url VARCHAR(255) DEFAULT '',
         in_stock TINYINT DEFAULT 1,
         featured TINYINT DEFAULT 0,
+        game_item_id INT DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+        // Add game_item_id to existing tables that predate this column
+        try {
+            await conn.query("ALTER TABLE store_items ADD COLUMN game_item_id INT DEFAULT 0");
+        } catch (e) { /* column already exists */ }
         console.log("✅ Table: store_items");
 
         // Orders

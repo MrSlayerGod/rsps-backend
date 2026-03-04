@@ -30,6 +30,15 @@ app.use("/api/auth", authRoutes);
 app.use("/api/highscores", highscoresRoutes);
 app.use("/api/store", storeRoutes);
 
+// Game server authentication — POSTs the api_password, gets back a token used as r_auth cookie
+app.post("/api/authenticate/login", (req, res) => {
+  const password = req.body; // JSON encoded string sent by game server
+  if (password !== process.env.API_SECRET) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+  res.json(process.env.API_SECRET);
+});
+
 app.get("/api/health", (req, res) => res.json({
   status: "ok",
   server: process.env.SERVER_NAME,

@@ -3,6 +3,17 @@ const websiteDB = require("../db/website-db");
 const { authenticate } = require("../middleware/auth");
 const router = express.Router();
 
+// Validates requests from the game server via r_auth cookie
+function authenticateGameServer(req, res, next) {
+  const cookie = req.headers.cookie || "";
+  const match = cookie.match(/r_auth=([^;]+)/);
+  const token = match ? match[1] : null;
+  if (!token || token !== process.env.API_SECRET) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
+
 router.get("/items", async (req, res) => {
   const conn = await websiteDB.getConnection();
   try {
@@ -118,6 +129,48 @@ router.get("/orders", authenticate, async (req, res) => {
       [req.user.id]
     );
     res.json({ orders });
+  } finally { conn.release(); }
+});
+
+// Game server calls GET /api/store/claim?username=X to get pending deliveries
+router.get("/claim", authenticateGameServer, async (req, res) => {
+  const conn = await websiteDB.getConnection();
+  try {
+    const { username } = req.query;
+    if (!username) return res.status(400).json({ error: "Missing username" });
+
+    const [deliveries] = await conn.query(
+      `SELECT pd.id, pd.quantity, si.game_item_id, si.price
+       FROM pending_deliveries pd
+       JOIN store_items si ON si.id = pd.item_id
+       WHERE pd.username = ? AND pd.delivered = 0 AND si.game_item_id > 0`,
+      [username]
+    );
+
+    const [userRows] = await conn.query(
+      "SELECT donor_total FROM website_users WHERE username = ?", [username]
+    );
+    const overallSpent = userRows.length ? Math.round(parseFloat(userRows[0].donor_total) * 100) : 0;
+    const totalSpentThisClaim = deliveries.reduce((s, d) => s + Math.round(parseFloat(d.price) * 100 * d.quantity), 0);
+
+    const viewModels = deliveries.map(d => ({
+      basketModel: { id: String(d.id) },
+      inGameItems: { items: [{ itemId: d.game_item_id, amount: d.quantity }] }
+    }));
+
+    res.json({ username, totalSpentThisClaim, overallSpent, viewModels });
+  } finally { conn.release(); }
+});
+
+// Game server calls POST /api/store/claim/confirm after delivering items
+router.post("/claim/confirm", authenticateGameServer, async (req, res) => {
+  const conn = await websiteDB.getConnection();
+  try {
+    const ids = req.body; // array of delivery ID strings
+    if (!Array.isArray(ids) || ids.length === 0) return res.json({ success: true });
+    const numericIds = ids.map(id => parseInt(id)).filter(Boolean);
+    await conn.query("UPDATE pending_deliveries SET delivered = 1 WHERE id IN (?)", [numericIds]);
+    res.json({ success: true });
   } finally { conn.release(); }
 });
 
