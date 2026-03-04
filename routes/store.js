@@ -1,0 +1,124 @@
+const express = require("express");
+const websiteDB = require("../db/website-db");
+const { authenticate } = require("../middleware/auth");
+const router = express.Router();
+
+router.get("/items", async (req, res) => {
+  const conn = await websiteDB.getConnection();
+  try {
+    const { category } = req.query;
+    let items;
+    if (category && category !== "all") {
+      [items] = await conn.query("SELECT * FROM store_items WHERE category = ? AND in_stock = 1 ORDER BY price ASC", [category]);
+    } else {
+      [items] = await conn.query("SELECT * FROM store_items WHERE in_stock = 1 ORDER BY category, price ASC");
+    }
+    res.json({ items });
+  } finally { conn.release(); }
+});
+
+router.get("/featured", async (req, res) => {
+  const conn = await websiteDB.getConnection();
+  try {
+    const [items] = await conn.query("SELECT * FROM store_items WHERE featured = 1 AND in_stock = 1 ORDER BY price ASC");
+    res.json({ items });
+  } finally { conn.release(); }
+});
+
+router.post("/checkout", authenticate, async (req, res) => {
+  const conn = await websiteDB.getConnection();
+  try {
+    const { items } = req.body;
+    if (!items || !items.length) return res.status(400).json({ error: "Cart is empty" });
+
+    await conn.beginTransaction();
+    let total = 0;
+    const lineItems = [];
+
+    for (const cartItem of items) {
+      const [storeItems] = await conn.query("SELECT * FROM store_items WHERE id = ? AND in_stock = 1", [cartItem.id]);
+      if (storeItems.length === 0) throw new Error("Item not found");
+      const qty = Math.max(1, parseInt(cartItem.quantity) || 1);
+      total += storeItems[0].price * qty;
+      lineItems.push({ ...storeItems[0], quantity: qty });
+    }
+
+    const [users] = await conn.query("SELECT username FROM website_users WHERE id = ?", [req.user.id]);
+    const username = users[0]?.username || "unknown";
+
+    const [orderResult] = await conn.query(
+      "INSERT INTO orders (user_id, username, total, status) VALUES (?, ?, ?, 'pending')",
+      [req.user.id, username, total]
+    );
+
+    for (const li of lineItems) {
+      await conn.query("INSERT INTO order_items (order_id, item_id, quantity, price) VALUES (?, ?, ?, ?)",
+        [orderResult.insertId, li.id, li.quantity, li.price]);
+    }
+
+    await conn.commit();
+    res.status(201).json({ order: { orderId: orderResult.insertId, total, items: lineItems } });
+  } catch (err) {
+    await conn.rollback();
+    res.status(500).json({ error: err.message || "Server error" });
+  } finally { conn.release(); }
+});
+
+router.post("/complete", authenticate, async (req, res) => {
+  const conn = await websiteDB.getConnection();
+  try {
+    const { orderId, paymentId } = req.body;
+    const [orders] = await conn.query("SELECT * FROM orders WHERE id = ? AND user_id = ?", [orderId, req.user.id]);
+    if (orders.length === 0) return res.status(404).json({ error: "Order not found" });
+    if (orders[0].status === "completed") return res.status(400).json({ error: "Already completed" });
+
+    await conn.beginTransaction();
+
+    await conn.query("UPDATE orders SET status = 'completed', payment_id = ? WHERE id = ?",
+      [paymentId || "SIM-" + Date.now(), orderId]);
+    await conn.query("UPDATE website_users SET donor_total = donor_total + ? WHERE id = ?",
+      [orders[0].total, req.user.id]);
+
+    const [userRows] = await conn.query("SELECT donor_total FROM website_users WHERE id = ?", [req.user.id]);
+    const dt = parseFloat(userRows[0].donor_total);
+    let newRank = "None";
+    if (dt >= 250) newRank = "Uber";
+    else if (dt >= 100) newRank = "Legendary";
+    else if (dt >= 50) newRank = "Extreme";
+    else if (dt >= 25) newRank = "Super";
+    else if (dt >= 10) newRank = "Regular";
+
+    await conn.query("UPDATE website_users SET donor_rank = ? WHERE id = ?", [newRank, req.user.id]);
+
+    // Create pending deliveries for game server
+    const [orderItems] = await conn.query(
+      "SELECT oi.*, si.name as item_name FROM order_items oi JOIN store_items si ON si.id = oi.item_id WHERE oi.order_id = ?",
+      [orderId]
+    );
+    for (const oi of orderItems) {
+      await conn.query(
+        "INSERT INTO pending_deliveries (username, item_name, item_id, quantity, order_id) VALUES (?, ?, ?, ?, ?)",
+        [orders[0].username, oi.item_name, oi.item_id, oi.quantity, orderId]
+      );
+    }
+
+    await conn.commit();
+    res.json({ message: "Payment completed", donor_rank: newRank });
+  } catch (err) {
+    await conn.rollback();
+    res.status(500).json({ error: "Server error" });
+  } finally { conn.release(); }
+});
+
+router.get("/orders", authenticate, async (req, res) => {
+  const conn = await websiteDB.getConnection();
+  try {
+    const [orders] = await conn.query(
+      "SELECT o.*, GROUP_CONCAT(si.name SEPARATOR ', ') as item_names FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id LEFT JOIN store_items si ON si.id = oi.item_id WHERE o.user_id = ? GROUP BY o.id ORDER BY o.created_at DESC",
+      [req.user.id]
+    );
+    res.json({ orders });
+  } finally { conn.release(); }
+});
+
+module.exports = router;
