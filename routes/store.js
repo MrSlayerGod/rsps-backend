@@ -2,6 +2,7 @@ const express = require("express");
 const websiteDB = require("../db/website-db");
 const { authenticate } = require("../middleware/auth");
 const router = express.Router();
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 // Validates requests from the game server via r_auth cookie
 function authenticateGameServer(req, res, next) {
@@ -129,6 +130,46 @@ router.get("/orders", authenticate, async (req, res) => {
       [req.user.id]
     );
     res.json({ orders });
+  } finally { conn.release(); }
+});
+
+// Creates a Stripe Checkout session and returns the redirect URL
+router.post("/create-checkout-session", authenticate, async (req, res) => {
+  const conn = await websiteDB.getConnection();
+  try {
+    const { orderId } = req.body;
+    const [orders] = await conn.query(
+      "SELECT * FROM orders WHERE id = ? AND user_id = ? AND status = 'pending'",
+      [orderId, req.user.id]
+    );
+    if (!orders.length) return res.status(404).json({ error: "Order not found" });
+
+    const [orderItems] = await conn.query(
+      "SELECT oi.quantity, oi.price, si.name FROM order_items oi JOIN store_items si ON si.id = oi.item_id WHERE oi.order_id = ?",
+      [orderId]
+    );
+
+    const line_items = orderItems.map(item => ({
+      price_data: {
+        currency: "gbp",
+        product_data: { name: item.name },
+        unit_amount: Math.round(parseFloat(item.price) * 100),
+      },
+      quantity: item.quantity,
+    }));
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      line_items,
+      mode: "payment",
+      success_url: process.env.FRONTEND_URL + "/store?payment=success&order_id=" + orderId + "&session_id={CHECKOUT_SESSION_ID}",
+      cancel_url: process.env.FRONTEND_URL + "/store?payment=cancelled",
+      metadata: { orderId: String(orderId) },
+    });
+
+    res.json({ url: session.url });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   } finally { conn.release(); }
 });
 
