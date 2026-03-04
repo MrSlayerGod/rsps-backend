@@ -4,22 +4,19 @@ require("dotenv").config();
 async function setup() {
     console.log("Setting up website database...\n");
 
-    // Connect WITHOUT specifying database first (to create it)
+    // Connect directly to the specified database
     const conn = await mysql.createConnection({
         host: process.env.WEBSITE_DB_HOST || "localhost",
         port: parseInt(process.env.WEBSITE_DB_PORT) || 3306,
         user: process.env.WEBSITE_DB_USER || "root",
-        password: process.env.WEBSITE_DB_PASSWORD || "root",
+        password: process.env.WEBSITE_DB_PASSWORD || "",
+        database: process.env.WEBSITE_DB_NAME || "railway",
     });
 
-    const dbName = process.env.WEBSITE_DB_NAME || "runevault_website";
+    const dbName = process.env.WEBSITE_DB_NAME || "railway";
 
     try {
-        // Create database
-        await conn.query("CREATE DATABASE IF NOT EXISTS `" + dbName + "`");
-        console.log("✅ Database created: " + dbName);
-
-        await conn.query("USE `" + dbName + "`");
+        console.log("✅ Connected to database: " + dbName);
 
         // Website users (separate from game accounts)
         await conn.query(`
