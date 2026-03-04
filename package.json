@@ -17,6 +17,7 @@
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "mysql2": "^3.11.4",
+    "resend": "^6.9.3",
     "stripe": "^17.0.0"
   }
 }

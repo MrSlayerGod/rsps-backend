@@ -28,9 +28,18 @@ async function setup() {
         display_name VARCHAR(12),
         donor_rank VARCHAR(20) DEFAULT 'None',
         donor_total DECIMAL(10,2) DEFAULT 0,
+        email_verified TINYINT(1) DEFAULT 0,
+        email_token VARCHAR(64),
+        email_token_expires DATETIME,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+        // Add email verification columns to existing tables
+        for (const col of [
+          "ALTER TABLE website_users ADD COLUMN email_verified TINYINT(1) DEFAULT 0",
+          "ALTER TABLE website_users ADD COLUMN email_token VARCHAR(64)",
+          "ALTER TABLE website_users ADD COLUMN email_token_expires DATETIME"
+        ]) { try { await conn.query(col); } catch (e) { /* already exists */ } }
         console.log("✅ Table: website_users");
 
         // Store items

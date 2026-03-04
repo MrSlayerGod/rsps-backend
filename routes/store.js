@@ -3,6 +3,7 @@ const websiteDB = require("../db/website-db");
 const { authenticate } = require("../middleware/auth");
 const router = express.Router();
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const { sendReceiptEmail } = require("../lib/email");
 
 // Validates requests from the game server via r_auth cookie
 function authenticateGameServer(req, res, next) {
@@ -79,19 +80,30 @@ router.post("/checkout", authenticate, async (req, res) => {
 router.post("/complete", authenticate, async (req, res) => {
   const conn = await websiteDB.getConnection();
   try {
-    const { orderId, paymentId } = req.body;
+    const { orderId, paymentId: sessionId } = req.body;
+
+    // Verify with Stripe that the session is actually paid
+    let session;
+    try {
+      session = await stripe.checkout.sessions.retrieve(sessionId);
+    } catch (e) {
+      return res.status(400).json({ error: "Invalid payment session" });
+    }
+    if (session.payment_status !== "paid") return res.status(400).json({ error: "Payment not completed" });
+    if (session.metadata?.orderId !== String(orderId)) return res.status(400).json({ error: "Order mismatch" });
+
     const [orders] = await conn.query("SELECT * FROM orders WHERE id = ? AND user_id = ?", [orderId, req.user.id]);
     if (orders.length === 0) return res.status(404).json({ error: "Order not found" });
     if (orders[0].status === "completed") return res.status(400).json({ error: "Already completed" });
 
     await conn.beginTransaction();
 
-    await conn.query("UPDATE orders SET status = 'completed', payment_id = ? WHERE id = ?",
-      [paymentId || "SIM-" + Date.now(), orderId]);
+    await conn.query("UPDATE orders SET status = 'completed', payment_id = ?, payment_method = 'stripe' WHERE id = ?",
+      [sessionId, orderId]);
     await conn.query("UPDATE website_users SET donor_total = donor_total + ? WHERE id = ?",
       [orders[0].total, req.user.id]);
 
-    const [userRows] = await conn.query("SELECT donor_total FROM website_users WHERE id = ?", [req.user.id]);
+    const [userRows] = await conn.query("SELECT * FROM website_users WHERE id = ?", [req.user.id]);
     const dt = parseFloat(userRows[0].donor_total);
     let newRank = "None";
     if (dt >= 250) newRank = "Uber";
@@ -102,19 +114,24 @@ router.post("/complete", authenticate, async (req, res) => {
 
     await conn.query("UPDATE website_users SET donor_rank = ? WHERE id = ?", [newRank, req.user.id]);
 
-    // Create pending deliveries for game server
     const [orderItems] = await conn.query(
-      "SELECT oi.*, si.name as item_name FROM order_items oi JOIN store_items si ON si.id = oi.item_id WHERE oi.order_id = ?",
+      "SELECT oi.*, si.name FROM order_items oi JOIN store_items si ON si.id = oi.item_id WHERE oi.order_id = ?",
       [orderId]
     );
     for (const oi of orderItems) {
       await conn.query(
         "INSERT INTO pending_deliveries (username, item_name, item_id, quantity, order_id) VALUES (?, ?, ?, ?, ?)",
-        [orders[0].username, oi.item_name, oi.item_id, oi.quantity, orderId]
+        [orders[0].username, oi.name, oi.item_id, oi.quantity, orderId]
       );
     }
 
     await conn.commit();
+
+    // Send receipt email (non-blocking)
+    sendReceiptEmail(userRows[0].email, userRows[0].username, orders[0], orderItems).catch(err =>
+      console.error("Failed to send receipt email:", err.message)
+    );
+
     res.json({ message: "Payment completed", donor_rank: newRank });
   } catch (err) {
     await conn.rollback();
